@@ -39,7 +39,7 @@ def calculate_indicators(df):
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    df['RSI'] = 100 - (100 / (1 + (gain / loss.replace(0, np.nan))))
+    df['RSI'] = 100 - (100 / (1 + (gain/loss.replace(0, np.nan))))
     
     # MACD (12, 26, 9)
     ema12 = df['Close'].ewm(span=12, adjust=False).mean()
@@ -70,7 +70,7 @@ def analyze_stock(symbol, cost=None):
         symbol = symbol.strip().upper()
         ticker = yf.Ticker(symbol)
         df = ticker.history(period="1y")
-        if df.empty or len(df) < 60: return None # 確保有足夠資料計算 MA60
+        if df.empty or len(df) < 20: return None # 基礎資料不足
         
         df = calculate_indicators(df)
         info = ticker.info
@@ -83,7 +83,7 @@ def analyze_stock(symbol, cost=None):
         # 1. 趨勢權重 (40分)
         if curr_p > df['MA20'].iloc[-1]: 
             score += 25; diag.append("📈 月線上")
-        if curr_p > df['MA60'].iloc[-1]: 
+        if len(df) >= 60 and curr_p > df['MA60'].iloc[-1]: 
             score += 15; diag.append("🏛️ 季線上")
             
         # 2. 動能權重 (30分)
@@ -107,14 +107,10 @@ def analyze_stock(symbol, cost=None):
 
         # --- 進場/持有狀態驗證 ---
         status = "觀察中"
-        sl = "N/A"
-        tp = "N/A"
-        
         if cost:
             # 專業移動停損：取 [成本*0.93] 與 [月線*0.98] 較大值
             sl = max(cost * 0.93, df['MA20'].iloc[-1] * 0.98)
             tp = df['BB_Up'].iloc[-1] # 停利參考布林上軌
-            
             if curr_p <= sl: status = "🛑 建議停損"
             elif curr_p >= tp: status = "💰 建議獲利"
             elif curr_p < cost: status = "📉 套牢觀察"
@@ -123,12 +119,9 @@ def analyze_stock(symbol, cost=None):
         return {
             "股名": info.get('shortName', symbol), "代碼": symbol, "現價": round(curr_p, 2),
             "評分": score, "診斷": " | ".join(diag), "df": df, "成本": cost, 
-            "狀態": status, "新聞": ticker.news[:3], "RSI": round(rsi, 1),
-            "停損點": round(sl, 2) if isinstance(sl, float) else sl,
-            "停利點": round(tp, 2) if isinstance(tp, float) else tp
+            "狀態": status, "新聞": ticker.news[:3], "RSI": round(rsi, 1)
         }
-    except Exception as e:
-        return None
+    except: return None
 
 # --- 5. UI 介面架構 ---
 st.sidebar.title("🤖 2026 AI 旗艦導航")
@@ -147,9 +140,7 @@ run_scan = st.sidebar.button("🚀 執行 0050 全清單掃描")
 
 # A. 個股詳情診斷
 if search_symbol:
-    with st.spinner('正在獲取最新資料...'):
-        res = analyze_stock(search_symbol)
-        
+    res = analyze_stock(search_symbol)
     if res:
         st.header(f"📊 {res['股名']} ({search_symbol}) AI 深度報告")
         c1, c2, c3 = st.columns(3)
@@ -166,17 +157,11 @@ if search_symbol:
         ])
         fig.update_layout(height=500, xaxis_rangeslider_visible=False, margin=dict(t=30))
         st.plotly_chart(fig, use_container_width=True)
-        
-        # 新聞摘要
-        if res['新聞']:
-            st.subheader("📰 最新相關新聞")
-            for item in res['新聞']:
-                st.markdown(f"[{item['title']}]({item['link']})")
-    else: 
-        st.error("查無資料，請確認代碼格式 (如 2330.TW)。")
+    else: st.error("查無資料，請確認代碼格式 (如 2330.TW)。")
 
 # B. 全清單掃描與驗證
 if run_scan:
+    # 這是您更新後的 0050 完整清單 (含新標的)
     STOCKS_0050 = [
         "2330.TW", "2317.TW", "2454.TW", "2308.TW", "2881.TW", "2882.TW", "2382.TW", "2412.TW",
         "2357.TW", "3711.TW", "2603.TW", "2891.TW", "2303.TW", "2886.TW", "2884.TW", "2892.TW",
@@ -184,41 +169,32 @@ if run_scan:
         "2885.TW", "2327.TW", "2890.TW", "3231.TW", "4938.TW", "2408.TW", "2609.TW", "2615.TW",
         "1301.TW", "1303.TW", "5871.TW", "5876.TW", "2345.TW", "6669.TW", "3037.TW", "3045.TW",
         "2409.TW", "1326.TW", "2912.TW", "1101.TW", "2395.TW", "2883.TW", "4958.TW", "2354.TW",
-        "1402.TW", "9910.TW", "2610.TW", "2618.TW" # 已排除無效代碼
+        "1402.TW", "9910.TW", "009816.TW", "2610.TW", "2618.TW", "txff.TW", "pow00.TW"
     ]
     
     with st.spinner('AI 正在計算成分股數據...'):
-        pool = ThreadPool(12) 
+        pool = ThreadPool(12) # 多線程提速
         all_res = [r for r in pool.map(analyze_stock, STOCKS_0050) if r]
-        
-    if all_res:
         res_df = pd.DataFrame(all_res).sort_values(by="評分", ascending=False)
-        
-        st.subheader(f"🎯 AI 推薦進場清單 (得分 >= {threshold})")
-        pick_df = res_df[res_df['評分'] >= threshold][['股名', '代碼', '現價', '評分', '診斷']]
-        if not pick_df.empty:
-            st.dataframe(pick_df, use_container_width=True, hide_index=True)
-        else:
-            st.info(f"目前無股票達到 {threshold} 分門檻。")
+    
+    st.subheader(f"🎯 AI 推薦進場清單 (得分 >= {threshold})")
+    pick_df = res_df[res_df['評分'] >= threshold][['股名', '代碼', '現價', '評分', '診斷']]
+    st.dataframe(pick_df, use_container_width=True, hide_index=True)
 
-        st.divider()
-        st.subheader("💼 我的持股損益與出場預警")
-        my_list = []
-        for line in portfolio_raw.split('\n'):
-            if ',' in line:
-                try:
-                    s, c = line.split(',')
-                    r = analyze_stock(s.strip(), float(c.strip()))
-                    if r: my_list.append(r)
-                except: continue
-                
-        if my_list:
-            my_df = pd.DataFrame(my_list)[['股名', '代碼', '成本', '現價', '停利點', '停損點', '狀態', '評分']]
-            st.dataframe(my_df, use_container_width=True, hide_index=True)
-        else: 
-            st.info("尚未輸入有效的持股資料。")
-    else:
-        st.error("網路連線異常，無法取得股票數據。")
+    st.divider()
+    st.subheader("💼 我的持股損益與出場預警")
+    my_list = []
+    for line in portfolio_raw.split('\n'):
+        if ',' in line:
+            try:
+                s, c = line.split(',')
+                r = analyze_stock(s.strip(), float(c.strip()))
+                if r: my_list.append(r)
+            except: continue
+    if my_list:
+        my_df = pd.DataFrame(my_list)[['股名', '代碼', '成本', '現價', '狀態', '評分', '診斷']]
+        st.dataframe(my_df, use_container_width=True, hide_index=True)
+    else: st.info("左側輸入持股成本可啟動驗證功能。")
 
 elif not search_symbol:
-    st.warning(f"👈 請點擊左側「執行掃描」來獲取 {datetime.now().strftime('%Y/%m/%d')} 的最新市場解析。")
+    st.warning("👈 請點擊左側「執行掃描」來獲取 2026/03/31 的最新市場解析。")
