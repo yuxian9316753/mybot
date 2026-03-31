@@ -5,7 +5,6 @@ import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime
 import time
-from multiprocessing.dummy import Pool as ThreadPool
 import urllib.request
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -14,14 +13,14 @@ from email.utils import parsedate_to_datetime
 # --- 1. 網頁基礎配置 ---
 st.set_page_config(page_title="台股 2026 AI 旗艦智報", layout="wide")
 
-# --- 1.5 獨家黑科技：Google 新聞 RSS 自動抓取 (優化代碼搜尋) ---
+# --- 1.5 獨家快取黑科技：Google 新聞 RSS 自動抓取 ---
+@st.cache_data(ttl=900, show_spinner=False) # 快取 15 分鐘，避免重複抓取
 def fetch_google_news(stock_id):
-    """使用股票代號精準搜尋 Google 中文新聞"""
     try:
+        time.sleep(0.2) # 網路請求保護
         encoded_kw = urllib.parse.quote(f"{stock_id} 股票")
         url = f"https://news.google.com/rss/search?q={encoded_kw}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
-        # 加上更完整的 User-Agent 偽裝，避免被 Google 阻擋
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req) as response:
             root = ET.fromstring(response.read())
@@ -32,16 +31,15 @@ def fetch_google_news(stock_id):
             pub_date_str = item.find('pubDate').text
             dt = parsedate_to_datetime(pub_date_str)
             news_list.append({
-                'title': title,
-                'link': link,
+                'title': title, 'link': link,
                 'publisher': 'Google 財經',
                 'providerPublishTime': dt.timestamp()
             })
         return news_list
-    except:
-        return []
+    except: return []
 
-# --- 2. 市場位階判定 ---
+# --- 2. 市場位階判定 (啟用快取) ---
+@st.cache_data(ttl=1800, show_spinner=False) # 大盤數據快取 30 分鐘
 def get_market_context():
     try:
         twii = yf.Ticker("^TWII").history(period="1y")
@@ -84,16 +82,26 @@ def calculate_indicators(df):
     df['Vol_Ratio'] = df['Volume'] / df['Volume'].rolling(5).mean().replace(0, np.nan)
     return df
 
-# --- 4. 核心診斷與權重評分系統 (數值全開版) ---
-def analyze_stock(symbol, cost=None):
+# --- 3.5 高速數據快取引擎 ---
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_stock_data(symbol):
+    """底層網路請求，透過快取攔截，避免重複下載拖慢速度"""
+    time.sleep(0.1) # 只在真正網路請求時保護 IP
     try:
-        symbol = symbol.strip().upper()
         ticker = yf.Ticker(symbol)
         df = ticker.history(period="1y")
-        if df.empty or len(df) < 60: return None 
-        
+        if df.empty or len(df) < 60: return None, None, None
         df = calculate_indicators(df)
-        info = ticker.info
+        return df, ticker.info, ticker.news[:5]
+    except: return None, None, None
+
+# --- 4. 核心診斷與權重評分系統 (極速運算版) ---
+def analyze_stock(symbol, cost=None):
+    symbol = symbol.strip().upper()
+    df, info, news_data = fetch_stock_data(symbol)
+    if df is None: return None
+    
+    try:
         curr_p = df['Close'].iloc[-1]
         
         # 取得實際數值
@@ -106,10 +114,8 @@ def analyze_stock(symbol, cost=None):
         eps = info.get('trailingEps', 0)
         
         score = 0
-        diag_pos = [] 
-        diag_neg = [] 
+        diag_pos, diag_neg = [], []
         
-        # 💡 全部補上數值
         ma20_status = f"📉 跌破({ma20_val})"
         if curr_p > df['MA20'].iloc[-1]: 
             score += 25; ma20_status = f"📈 站上({ma20_val})"; diag_pos.append("站上月線")
@@ -160,18 +166,15 @@ def analyze_stock(symbol, cost=None):
         raw_name = info.get('shortName') or symbol
         short_name = raw_name[:12] + '..' if len(raw_name) > 12 else raw_name
 
-        # 🌟 改用「股票代碼」搜尋 Google 新聞
-        news_data = ticker.news[:5]
         if not news_data or len(news_data) == 0:
-            stock_id = symbol.split('.')[0] # 把 2912.TW 變成 2912
+            stock_id = symbol.split('.')[0]
             news_data = fetch_google_news(stock_id)
 
         return {
             "股名": short_name, "代碼": symbol, "現價": round(curr_p, 2), "評分": score, 
             "行動": action, "月線": ma20_status, "季線": ma60_status, "MACD": macd_status, 
             "KD": kd_status, "RSI": round(rsi_val, 1), "量能": vol_status, "EPS": eps_status,
-            "優勢": diag_pos, "劣勢": diag_neg, 
-            "df": df, "成本": cost, "狀態": status, "新聞": news_data,
+            "優勢": diag_pos, "劣勢": diag_neg, "df": df, "成本": cost, "狀態": status, "新聞": news_data,
             "停損點": round(sl, 2) if isinstance(sl, float) else sl, "停利點": round(tp, 2) if isinstance(tp, float) else tp
         }
     except Exception as e: return None
@@ -194,7 +197,7 @@ run_scan = st.sidebar.button("🚀 執行 0050 全清單掃描")
 # A. 個股詳情診斷
 # ==========================================
 if search_symbol:
-    with st.spinner('正在解構數據與掃描全網新聞...'):
+    with st.spinner('正在極速解構數據...'):
         res = analyze_stock(search_symbol)
         
     if res:
@@ -219,7 +222,6 @@ if search_symbol:
             fig.update_layout(height=450, xaxis_rangeslider_visible=False, margin=dict(t=30))
             st.plotly_chart(fig, use_container_width=True)
         
-        # 📰 新聞與 Google 備援總結
         with c_news:
             st.subheader("📰 AI 新聞智慧摘要")
             if res['新聞']:
@@ -238,10 +240,9 @@ if search_symbol:
                         sentiment = "⚠️ 警訊"
                         
                     st.markdown(f"🔗 **[{title}]({item.get('link', '#')})**")
-                    st.markdown(f"> **情緒總結：** {sentiment} | 媒體: {item.get('publisher', '財經新聞')} ({pub_time})")
+                    st.markdown(f"> **情緒總結：** {sentiment} | 媒體: {item.get('publisher', '財經')} ({pub_time})")
                     st.write("---")
-            else:
-                st.warning("⚠️ 查無此檔股票的近期新聞。")
+            else: st.warning("⚠️ 查無此檔股票的近期新聞。")
                 
     else: st.error("查無資料，請確認代碼格式 (如 2912.TW)。")
 
@@ -268,7 +269,6 @@ if run_scan:
         status_text.text(f"正在解析: {symbol} ({i+1}/{len(STOCKS_0050)})")
         res = analyze_stock(symbol)
         if res: all_res.append(res)
-        time.sleep(0.1) 
         progress_bar.progress((i + 1) / len(STOCKS_0050))
         
     status_text.empty()
