@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime
-from multiprocessing.dummy import Pool as ThreadPool
+import time
 
 # --- 1. 網頁基礎配置 ---
 st.set_page_config(page_title="台股 2026 AI 旗艦智報", layout="wide")
@@ -201,9 +201,25 @@ if run_scan:
         "1402.TW", "9910.TW", "2610.TW", "2618.TW" 
     ]
     
-    with st.spinner('AI 正在計算成分股數據...'):
-        pool = ThreadPool(12) 
-        all_res = [r for r in pool.map(analyze_stock, STOCKS_0050) if r]
+    st.write("### 🚀 系統正在安全獲取數據，請稍候...")
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    all_res = []
+    
+    # 採用安全迴圈模式，避開 Yahoo 防爬蟲機制
+    for i, symbol in enumerate(STOCKS_0050):
+        status_text.text(f"正在解析: {symbol} ({i+1}/{len(STOCKS_0050)})")
+        res = analyze_stock(symbol)
+        if res:
+            all_res.append(res)
+        
+        # 加入微小延遲防止被 Yahoo 伺服器封鎖
+        time.sleep(0.1)
+        progress_bar.progress((i + 1) / len(STOCKS_0050))
+        
+    status_text.empty()
+    progress_bar.empty()
         
     if all_res:
         res_df = pd.DataFrame(all_res).sort_values(by="評分", ascending=False)
@@ -212,7 +228,6 @@ if run_scan:
         pick_df = res_df[res_df['評分'] >= threshold]
         
         if not pick_df.empty:
-            # 顯示重要欄位，包含縮短後的名字、RSI與量能
             st.dataframe(pick_df[['股名', '代碼', '現價', 'RSI', '量能比', '評分', '診斷']], use_container_width=True, hide_index=True)
         else:
             st.info(f"目前無股票達到 {threshold} 分門檻。")
@@ -234,7 +249,7 @@ if run_scan:
         else: 
             st.info("尚未輸入有效的持股資料。")
     else:
-        st.error("網路連線異常，無法取得股票數據。")
+        st.error("網路連線異常，無法取得股票數據，請稍後再試。")
 
 elif not search_symbol:
     st.warning(f"👈 請點擊左側「執行掃描」來獲取 {datetime.now().strftime('%Y/%m/%d')} 的最新市場解析。")
