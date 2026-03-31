@@ -28,7 +28,7 @@ def get_market_context():
     except:
         return 75, "⚠️ 取得失敗", 0
 
-# --- 3. 核心技術指標運算 (RSI, MACD, KD, Bollinger, Vol) ---
+# --- 3. 核心技術指標運算 ---
 def calculate_indicators(df):
     # MA 均線
     df['MA5'] = df['Close'].rolling(5).mean()
@@ -39,7 +39,7 @@ def calculate_indicators(df):
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    df['RSI'] = 100 - (100 / (1 + (gain/loss.replace(0, np.nan))))
+    df['RSI'] = 100 - (100 / (1 + (gain / loss.replace(0, np.nan))))
     
     # MACD (12, 26, 9)
     ema12 = df['Close'].ewm(span=12, adjust=False).mean()
@@ -54,27 +54,34 @@ def calculate_indicators(df):
     df['K'] = rsv.ewm(com=2, adjust=False).mean()
     df['D'] = df['K'].ewm(com=2, adjust=False).mean()
     
-    # 布林通道 (Bollinger Bands)
+    # 布林通道
     df['BB_Mid'] = df['MA20']
     df['BB_Std'] = df['Close'].rolling(20).std()
     df['BB_Up'] = df['BB_Mid'] + (df['BB_Std'] * 2)
     df['BB_Low'] = df['BB_Mid'] - (df['BB_Std'] * 2)
     
-    # 量能比 (Vol_Ratio)
+    # 量能比
     df['Vol_Ratio'] = df['Volume'] / df['Volume'].rolling(5).mean().replace(0, np.nan)
     return df
 
-# --- 4. 核心診斷與權重評分系統 ---
+# --- 4. 核心診斷與權重評分系統 (數據強化版) ---
 def analyze_stock(symbol, cost=None):
     try:
         symbol = symbol.strip().upper()
         ticker = yf.Ticker(symbol)
         df = ticker.history(period="1y")
-        if df.empty or len(df) < 20: return None # 基礎資料不足
+        if df.empty or len(df) < 60: return None 
         
         df = calculate_indicators(df)
         info = ticker.info
         curr_p = df['Close'].iloc[-1]
+        
+        # 取得實際數值，用於顯示在診斷中
+        ma20_val = round(df['MA20'].iloc[-1], 1)
+        rsi_val = round(df['RSI'].iloc[-1], 1)
+        vol_ratio = round(df['Vol_Ratio'].iloc[-1], 2)
+        k_val = round(df['K'].iloc[-1], 1)
+        macd_val = round(df['MACD'].iloc[-1], 2)
         
         # --- 動態評分系統 (100分制) ---
         score = 0
@@ -82,46 +89,58 @@ def analyze_stock(symbol, cost=None):
         
         # 1. 趨勢權重 (40分)
         if curr_p > df['MA20'].iloc[-1]: 
-            score += 25; diag.append("📈 月線上")
-        if len(df) >= 60 and curr_p > df['MA60'].iloc[-1]: 
-            score += 15; diag.append("🏛️ 季線上")
+            score += 25; diag.append(f"📈 站上月線({ma20_val})")
+        if curr_p > df['MA60'].iloc[-1]: 
+            score += 15; diag.append("🏛️ 季線多頭")
             
         # 2. 動能權重 (30分)
         if df['MACD'].iloc[-1] > df['Signal'].iloc[-1]: 
-            score += 15; diag.append("🚀 MACD金叉")
+            score += 15; diag.append(f"🚀 MACD翻紅({macd_val})")
         if df['K'].iloc[-1] > df['D'].iloc[-1]: 
-            score += 15; diag.append("⚡ KD金叉")
+            score += 15; diag.append(f"⚡ KD金叉(K:{k_val})")
             
         # 3. 逆勢與超買修正 (10分)
-        rsi = df['RSI'].iloc[-1]
-        if rsi < 30: 
-            score += 10; diag.append("💎 RSI超賣(低接訊號)")
-        elif rsi > 75: 
-            score -= 10; diag.append("⚠️ RSI過熱(追高風險)")
+        if rsi_val < 30: 
+            score += 10; diag.append(f"💎 RSI超賣({rsi_val})")
+        elif rsi_val > 75: 
+            score -= 10; diag.append(f"⚠️ RSI過熱({rsi_val})")
             
         # 4. 量能與基本面 (20分)
-        if df['Vol_Ratio'].iloc[-1] > 1.5: 
-            score += 10; diag.append("🔥 帶量攻擊")
-        if info.get('trailingEps', 0) > 0: 
-            score += 10; diag.append("💰 獲利公司")
+        if vol_ratio > 1.5: 
+            score += 10; diag.append(f"🔥 量增({vol_ratio}倍)")
+        
+        eps = info.get('trailingEps', 0)
+        if eps and eps > 0: 
+            score += 10; diag.append(f"💰 獲利股(EPS:{eps})")
 
         # --- 進場/持有狀態驗證 ---
         status = "觀察中"
+        sl = "N/A"
+        tp = "N/A"
+        
         if cost:
-            # 專業移動停損：取 [成本*0.93] 與 [月線*0.98] 較大值
             sl = max(cost * 0.93, df['MA20'].iloc[-1] * 0.98)
-            tp = df['BB_Up'].iloc[-1] # 停利參考布林上軌
+            tp = df['BB_Up'].iloc[-1] 
+            
             if curr_p <= sl: status = "🛑 建議停損"
             elif curr_p >= tp: status = "💰 建議獲利"
             elif curr_p < cost: status = "📉 套牢觀察"
             else: status = "✅ 持續持有"
 
+        # 縮短股名以適應手機版面 (解決表格被撐爆的問題)
+        raw_name = info.get('shortName') or symbol
+        short_name = raw_name[:12] + '..' if len(raw_name) > 12 else raw_name
+
         return {
-            "股名": info.get('shortName', symbol), "代碼": symbol, "現價": round(curr_p, 2),
-            "評分": score, "診斷": " | ".join(diag), "df": df, "成本": cost, 
-            "狀態": status, "新聞": ticker.news[:3], "RSI": round(rsi, 1)
+            "股名": short_name, "代碼": symbol, "現價": round(curr_p, 2),
+            "評分": score, "RSI": rsi_val, "量能比": vol_ratio,
+            "診斷": " | ".join(diag), "df": df, "成本": cost, 
+            "狀態": status, "新聞": ticker.news[:3],
+            "停損點": round(sl, 2) if isinstance(sl, float) else sl,
+            "停利點": round(tp, 2) if isinstance(tp, float) else tp
         }
-    except: return None
+    except Exception as e:
+        return None
 
 # --- 5. UI 介面架構 ---
 st.sidebar.title("🤖 2026 AI 旗艦導航")
@@ -140,15 +159,20 @@ run_scan = st.sidebar.button("🚀 執行 0050 全清單掃描")
 
 # A. 個股詳情診斷
 if search_symbol:
-    res = analyze_stock(search_symbol)
+    with st.spinner('正在獲取最新資料...'):
+        res = analyze_stock(search_symbol)
+        
     if res:
         st.header(f"📊 {res['股名']} ({search_symbol}) AI 深度報告")
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("當前現價", f"{res['現價']} 元")
         c2.metric("趨勢總分", f"{res['評分']} / 100")
-        c3.info(f"**診斷結論：**\n{res['診斷']}")
+        c3.metric("RSI 指標", f"{res['RSI']}")
+        c4.metric("量能變化", f"{res['量能比']} 倍")
+        
+        st.info(f"**診斷結論：**\n{res['診斷']}")
 
-        # 畫圖邏輯 (K線 + MA20 + 布林)
+        # 畫圖邏輯
         df_p = res['df'].tail(80)
         fig = go.Figure(data=[
             go.Candlestick(x=df_p.index, open=df_p['Open'], high=df_p['High'], low=df_p['Low'], close=df_p['Close'], name='K線'),
@@ -157,11 +181,16 @@ if search_symbol:
         ])
         fig.update_layout(height=500, xaxis_rangeslider_visible=False, margin=dict(t=30))
         st.plotly_chart(fig, use_container_width=True)
-    else: st.error("查無資料，請確認代碼格式 (如 2330.TW)。")
+        
+        if res['新聞']:
+            st.subheader("📰 最新相關新聞")
+            for item in res['新聞']:
+                st.markdown(f"[{item['title']}]({item['link']})")
+    else: 
+        st.error("查無資料，請確認代碼格式 (如 2330.TW)。")
 
 # B. 全清單掃描與驗證
 if run_scan:
-    # 這是您更新後的 0050 完整清單 (含新標的)
     STOCKS_0050 = [
         "2330.TW", "2317.TW", "2454.TW", "2308.TW", "2881.TW", "2882.TW", "2382.TW", "2412.TW",
         "2357.TW", "3711.TW", "2603.TW", "2891.TW", "2303.TW", "2886.TW", "2884.TW", "2892.TW",
@@ -169,32 +198,43 @@ if run_scan:
         "2885.TW", "2327.TW", "2890.TW", "3231.TW", "4938.TW", "2408.TW", "2609.TW", "2615.TW",
         "1301.TW", "1303.TW", "5871.TW", "5876.TW", "2345.TW", "6669.TW", "3037.TW", "3045.TW",
         "2409.TW", "1326.TW", "2912.TW", "1101.TW", "2395.TW", "2883.TW", "4958.TW", "2354.TW",
-        "1402.TW", "9910.TW", "009816.TW", "2610.TW", "2618.TW", "txff.TW", "pow00.TW"
+        "1402.TW", "9910.TW", "2610.TW", "2618.TW" 
     ]
     
     with st.spinner('AI 正在計算成分股數據...'):
-        pool = ThreadPool(12) # 多線程提速
+        pool = ThreadPool(12) 
         all_res = [r for r in pool.map(analyze_stock, STOCKS_0050) if r]
+        
+    if all_res:
         res_df = pd.DataFrame(all_res).sort_values(by="評分", ascending=False)
-    
-    st.subheader(f"🎯 AI 推薦進場清單 (得分 >= {threshold})")
-    pick_df = res_df[res_df['評分'] >= threshold][['股名', '代碼', '現價', '評分', '診斷']]
-    st.dataframe(pick_df, use_container_width=True, hide_index=True)
+        
+        st.subheader(f"🎯 AI 推薦進場清單 (得分 >= {threshold})")
+        pick_df = res_df[res_df['評分'] >= threshold]
+        
+        if not pick_df.empty:
+            # 顯示重要欄位，包含縮短後的名字、RSI與量能
+            st.dataframe(pick_df[['股名', '代碼', '現價', 'RSI', '量能比', '評分', '診斷']], use_container_width=True, hide_index=True)
+        else:
+            st.info(f"目前無股票達到 {threshold} 分門檻。")
 
-    st.divider()
-    st.subheader("💼 我的持股損益與出場預警")
-    my_list = []
-    for line in portfolio_raw.split('\n'):
-        if ',' in line:
-            try:
-                s, c = line.split(',')
-                r = analyze_stock(s.strip(), float(c.strip()))
-                if r: my_list.append(r)
-            except: continue
-    if my_list:
-        my_df = pd.DataFrame(my_list)[['股名', '代碼', '成本', '現價', '狀態', '評分', '診斷']]
-        st.dataframe(my_df, use_container_width=True, hide_index=True)
-    else: st.info("左側輸入持股成本可啟動驗證功能。")
+        st.divider()
+        st.subheader("💼 我的持股損益與出場預警")
+        my_list = []
+        for line in portfolio_raw.split('\n'):
+            if ',' in line:
+                try:
+                    s, c = line.split(',')
+                    r = analyze_stock(s.strip(), float(c.strip()))
+                    if r: my_list.append(r)
+                except: continue
+                
+        if my_list:
+            my_df = pd.DataFrame(my_list)
+            st.dataframe(my_df[['股名', '代碼', '成本', '現價', '停利點', '停損點', '狀態', '評分']], use_container_width=True, hide_index=True)
+        else: 
+            st.info("尚未輸入有效的持股資料。")
+    else:
+        st.error("網路連線異常，無法取得股票數據。")
 
 elif not search_symbol:
-    st.warning("👈 請點擊左側「執行掃描」來獲取 2026/03/31 的最新市場解析。")
+    st.warning(f"👈 請點擊左側「執行掃描」來獲取 {datetime.now().strftime('%Y/%m/%d')} 的最新市場解析。")
