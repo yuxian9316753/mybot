@@ -19,17 +19,16 @@ def format_ticker(symbol):
     symbol = symbol.strip().upper()
     if not symbol:
         return ""
-    # 如果是純數字 (例如 2330, 0050)，自動補上 .TW
     if symbol.isdigit():
         return f"{symbol}.TW"
     return symbol
 
-# --- 1.5 Google 新聞 RSS 快取引擎 ---
+# --- 1.5 100% 純血 Google 新聞 RSS 引擎 ---
 @st.cache_data(ttl=900, show_spinner=False) 
 def fetch_google_news(stock_id):
-    """當 Yahoo 沒新聞時，啟動 Google 備援抓取"""
+    """全面棄用 Yahoo，強制使用 Google 抓取繁體中文新聞"""
     try:
-        time.sleep(0.2) # 網路請求保護
+        time.sleep(0.2) 
         encoded_kw = urllib.parse.quote(f"{stock_id} 股票")
         url = f"https://news.google.com/rss/search?q={encoded_kw}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
@@ -39,15 +38,27 @@ def fetch_google_news(stock_id):
         news_list = []
         for item in root.findall('.//item')[:5]: 
             title = item.find('title').text
-            dt = parsedate_to_datetime(item.find('pubDate').text)
+            link = item.find('link').text
+            
+            # 安全解析時間
+            pubDate_node = item.find('pubDate')
+            if pubDate_node is not None:
+                dt = parsedate_to_datetime(pubDate_node.text)
+                ts = dt.timestamp()
+            else:
+                ts = time.time()
+                
             news_list.append({
-                'title': title, 'link': item.find('link').text,
-                'publisher': 'Google 財經', 'providerPublishTime': dt.timestamp()
+                'title': title, 
+                'link': link,
+                'publisher': 'Google 財經', 
+                'providerPublishTime': ts
             })
         return news_list
-    except: return []
+    except Exception as e:
+        return []
 
-# --- 2. 市場位階判定 (大盤環境感知) ---
+# --- 2. 市場位階判定 ---
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_market_context():
     try:
@@ -56,13 +67,12 @@ def get_market_context():
         curr_idx = twii['Close'].iloc[-1]
         ma240 = twii['Close'].rolling(240).mean().iloc[-1]
         
-        # 依據大盤年線乖離調整進場嚴格度
         if curr_idx > ma240 * 1.05: return 65, "🔥 多頭市場 (順勢模式)", curr_idx
         elif curr_idx < ma240 * 0.95: return 85, "❄️ 空頭市場 (防禦模式)", curr_idx
         else: return 75, "☁️ 震盪市場 (標準模式)", curr_idx
     except: return 75, "⚠️ 取得大盤失敗", 0
 
-# --- 3. 核心技術指標運算 (9大標準基礎) ---
+# --- 3. 核心技術指標運算 ---
 def calculate_indicators(df):
     df['MA20'] = df['Close'].rolling(20).mean()
     df['MA60'] = df['Close'].rolling(60).mean()
@@ -83,31 +93,28 @@ def calculate_indicators(df):
     df['K'] = rsv.ewm(com=2, adjust=False).mean()
     df['D'] = df['K'].ewm(com=2, adjust=False).mean()
     
-    # 布林通道上軌做為停利點
     df['BB_Up'] = df['MA20'] + (df['Close'].rolling(20).std() * 2)
-    # 量能比偵測攻擊量
     df['Vol_Ratio'] = df['Volume'] / df['Volume'].rolling(5).mean().replace(0, np.nan)
     return df
 
-# --- 3.5 高速數據快取引擎 ---
+# --- 3.5 高速數據快取引擎 (移除 Yahoo 新聞) ---
 @st.cache_data(ttl=900, show_spinner=False)
-def fetch_stock_data(symbol, needs_news=False):
-    time.sleep(0.1) # 溫和爬取，防封鎖
+def fetch_stock_data(symbol):
+    time.sleep(0.1) 
     try:
         ticker = yf.Ticker(symbol)
         df = ticker.history(period="1y")
-        if df.empty or len(df) < 60: return None, None, None
+        if df.empty or len(df) < 60: return None, None
         df = calculate_indicators(df)
-        news = ticker.news[:5] if needs_news else []
-        return df, ticker.info, news
-    except: return None, None, None
+        return df, ticker.info
+    except: return None, None
 
 # --- 4. 核心診斷與權重評分系統 ---
 def analyze_stock(raw_symbol, cost=None, is_single_search=False):
     symbol = format_ticker(raw_symbol)
     if not symbol: return None
     
-    df, info, news_data = fetch_stock_data(symbol, needs_news=is_single_search)
+    df, info = fetch_stock_data(symbol)
     if df is None: return None
     
     try:
@@ -120,7 +127,6 @@ def analyze_stock(raw_symbol, cost=None, is_single_search=False):
         score = 0
         diag_pos, diag_neg = [], []
         
-        # 【9大指標判定邏輯】
         ma20_status = f"📉 跌破({ma20_val})"
         if curr_p > df['MA20'].iloc[-1]: score += 25; ma20_status = f"📈 站上({ma20_val})"; diag_pos.append("站上月線")
         else: diag_neg.append("跌破月線")
@@ -137,8 +143,8 @@ def analyze_stock(raw_symbol, cost=None, is_single_search=False):
         if df['K'].iloc[-1] > df['D'].iloc[-1]: score += 15; kd_status = f"⚡ 金叉({k_val})"; diag_pos.append("KD走強")
         else: diag_neg.append("KD走弱")
             
-        if rsi_val < 30: score += 10; diag_pos.append("RSI超賣(低接)")
-        elif rsi_val > 75: score -= 10; diag_neg.append("RSI過熱(防追高)")
+        if rsi_val < 30: score += 10; diag_pos.append("RSI超賣")
+        elif rsi_val > 75: score -= 10; diag_neg.append("RSI過熱")
             
         vol_status = f"📊 正常({vol_ratio}倍)"
         if vol_ratio > 1.5: score += 10; vol_status = f"🔥 爆量({vol_ratio}倍)"; diag_pos.append("帶量攻擊")
@@ -150,23 +156,22 @@ def analyze_stock(raw_symbol, cost=None, is_single_search=False):
 
         action = "🚀 強力買進" if score >= 80 else ("📈 偏多佈局" if score >= 65 else "🟡 觀望等待")
 
-        # 持股狀態防守邏輯 (停損、停利)
         status = "未持有"
         sl = tp = "N/A"
         if cost:
-            sl = max(cost * 0.93, df['MA20'].iloc[-1] * 0.98) # 停損
-            tp = df['BB_Up'].iloc[-1] # 布林上軌停利
+            sl = max(cost * 0.93, df['MA20'].iloc[-1] * 0.98) 
+            tp = df['BB_Up'].iloc[-1] 
             if curr_p <= sl: status = "🛑 建議停損"
             elif curr_p >= tp: status = "💰 建議獲利"
             elif curr_p < cost: status = "📉 套牢觀察"
             else: status = "✅ 持續持有"
 
-        # 縮減名稱適應手機版
         raw_name = info.get('shortName') or symbol
         short_name = raw_name[:12] + '..' if len(raw_name) > 12 else raw_name
 
-        # 單獨搜尋且無新聞時，觸發 Google 新聞引擎
-        if is_single_search and (not news_data or len(news_data) == 0):
+        # 單筆搜尋時，強制觸發 Google 新聞引擎，再也不看 Yahoo 臉色
+        news_data = []
+        if is_single_search:
             stock_id = symbol.split('.')[0]
             news_data = fetch_google_news(stock_id)
 
@@ -197,7 +202,7 @@ run_scan = st.sidebar.button("🚀 執行 0050 全清單掃描")
 # A. 個股詳情診斷儀表板
 # ==========================================
 if search_symbol:
-    with st.spinner('正在極速解構數據...'):
+    with st.spinner('正在極速解構數據與彙整 Google 新聞...'):
         res = analyze_stock(search_symbol, is_single_search=True)
         
     if res:
@@ -208,7 +213,6 @@ if search_symbol:
         c3.metric("AI 建議行動", f"{res['行動']}")
         c4.metric("量能變化", f"{res['量能']}")
         
-        # 多空優劣勢分明顯示
         st.success(f"**✅ 多方優勢：** {', '.join(res['優勢']) if res['優勢'] else '無明顯多方訊號'}")
         st.error(f"**⚠️ 空方弱勢：** {', '.join(res['劣勢']) if res['劣勢'] else '無明顯空方訊號'}")
 
@@ -226,18 +230,16 @@ if search_symbol:
         with c_news:
             st.subheader("📰 AI 新聞智慧摘要")
             if res['新聞']:
-                is_google = "Google" in res['新聞'][0].get('publisher', '')
-                st.caption("🔍 來源：" + ("自動擷取自 Google 新聞" if is_google else "Yahoo Finance"))
+                st.caption("🔍 來源：自動擷取自 Google 新聞")
                 for item in res['新聞']:
                     pub_time = datetime.fromtimestamp(item.get('providerPublishTime', time.time())).strftime('%m/%d')
                     sentiment, title = "💡 中性", item.get('title', '')
-                    # 情緒關鍵字判斷
-                    if any(w in title for w in ['漲', '高', '利', '創', '增', '多', '買', '強', '飆', '配息']): sentiment = "🚀 利多"
-                    elif any(w in title for w in ['跌', '降', '災', '減', '壓', '空', '賣', '損', '弱', '逃', '崩']): sentiment = "⚠️ 警訊"
+                    if any(w in title for w in ['漲', '高', '利', '創', '增', '多', '買', '強', '飆', '配息', '大賺', '飆漲']): sentiment = "🚀 利多"
+                    elif any(w in title for w in ['跌', '降', '災', '減', '壓', '空', '賣', '損', '弱', '逃', '崩', '下修']): sentiment = "⚠️ 警訊"
                     st.markdown(f"🔗 **[{title}]({item.get('link', '#')})**")
-                    st.markdown(f"> **情緒：** {sentiment} | 媒體: {item.get('publisher', '財經')} ({pub_time})")
+                    st.markdown(f"> **情緒：** {sentiment} | 媒體: 財經 ({pub_time})")
                     st.write("---")
-            else: st.warning("⚠️ 查無此檔股票的近期新聞。")
+            else: st.warning("⚠️ Google 暫無此檔股票的近期新聞。")
     else: st.error(f"查無資料，請確認代碼是否正確 (您輸入的是: {search_symbol})。")
 
 # ==========================================
@@ -270,15 +272,14 @@ if run_scan:
         
     if all_res:
         res_df = pd.DataFrame(all_res)
-        # 防呆檢查，確保欄位存在
         if not res_df.empty and '評分' in res_df.columns:
             res_df = res_df.sort_values(by="評分", ascending=False)
             st.subheader(f"🎯 AI 推薦進場清單 (得分 >= {threshold})")
             pick_df = res_df[res_df['評分'] >= threshold]
             
             if not pick_df.empty:
+                # 確保獨立欄位順序正確
                 display_cols = ['股名', '代碼', '現價', '行動', '評分', '月線', '季線', 'MACD', 'KD', 'RSI', '量能', 'EPS']
-                # 視覺化升級：直覺進度條
                 st.dataframe(
                     pick_df[display_cols], use_container_width=True, hide_index=True,
                     column_config={"評分": st.column_config.ProgressColumn("趨勢評分", format="%d", min_value=0, max_value=100)}
